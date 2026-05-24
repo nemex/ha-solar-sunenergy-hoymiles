@@ -27,7 +27,7 @@ Zusätzlich überwacht ein Watchdog ob die Sensoren noch aktuelle Werte liefern.
 |---|---|
 | SunEnergy XT 500 Pro | Hybrid-Wechselrichter / Batteriespeicher |
 | Shelly Pro 3EM | Netzleistungsmessung am Hauptzähler |
-| Shelly Pro 1pm | Messung der Microinverter-Leistung (Hoymiles) |
+| Shelly Pro 1-PM | Messung der Microinverter-Leistung (Hoymiles) |
 | Hoymiles Microinverter | Optionale zweite Solarquelle |
 
 ---
