@@ -1,59 +1,45 @@
-# Solar: Master-Steuerung SunEnergy XT 500 Pro
-### Zero-Feed-In Regelung mit PI-Regler für Home Assistant — V7.8
+# ha-solar-master-steuerung
+
+**Zero-Feed-In Regelung für SunEnergy XT 500 Pro mit PI-Regler in Home Assistant**
+
+Automatische Nulleinspeisung für einen Hausspeicher: Der Akku gibt immer genau so viel ab wie das Haus gerade braucht, ohne Strom ins öffentliche Netz einzuspeisen. Ab V8.1 werden zwei Hoymiles Microinverter gleichzeitig geregelt.
 
 ---
 
-## Was macht diese Automation?
+## Hardware
 
-Diese Automation regelt einen SunEnergy XT 500 Pro Hybrid-Wechselrichter in Home Assistant vollautomatisch auf Nulleinspeisung. Das bedeutet: Der Akku gibt immer genau so viel ab wie das Haus gerade braucht, ohne dabei Strom ins öffentliche Netz zu drücken.
-
-Die Messung erfolgt über einen Shelly Pro 3EM am Hauptzähler. Der Messwert wird mit einem asymmetrischen Filter geglättet – bei echtem Mehrbedarf reagiert die Regelung schnell, bei kurzen Lastspitzen wie einem Wasserkocher bleibt sie ruhig. Die eigentliche Regelung übernimmt ein PI-Regler, der den Sollwert am Netzanschlusspunkt alle 5 Sekunden anpasst. Damit sich der Sollwert nicht zu schnell ändert, gibt es ein Rate-Limiting und eine Schreibschwelle – kleine Schwankungen werden ignoriert.
-
-Geladen wird der Akku ausschließlich mit Solarüberschuss. Produziert die Anlage mehr als das Haus gerade verbraucht, fließt die überschüssige Energie automatisch in den Akku. Es wird also nie gezielt Netzstrom zum Laden verwendet – außer in einem Ausnahmefall: Wurde der Akku länger als 15 Tage nicht vollgeladen, erzwingt die Automation eine Zwangsladung zum Schutz der Zellchemie.
-
-Ein konkretes Beispiel: Die Solaranlage produziert gerade 1200 W, das Haus verbraucht aber 2000 W. Die fehlenden 800 W müssten eigentlich aus dem Netz kommen. Liegt der Akkustand dabei unter dem konfigurierbaren Mindest-SOC (Standard: 18 %), greift der SOC-Schutz und die Automation holt die fehlende Leistung aus dem Netz, anstatt den Akku weiter zu entladen. Der Akku bleibt dann in Reserve, bis er wieder durch Solarüberschuss geladen wird. Ist der Akkustand ausreichend, gleicht er die Differenz zwischen Solar und Verbrauch automatisch aus – das Netz bleibt außen vor.
-
-Nachts, wenn keine Solar-Produktion vorhanden ist, wechselt die Automation automatisch in einen einfacheren Modus und orientiert sich direkt am Hausverbrauch – der Akku entlädt sich dann kontrolliert, bis entweder der Mindest-SOC erreicht ist oder der Morgen kommt.
-
-Zusätzlich überwacht ein Watchdog ob die Sensoren noch aktuelle Werte liefern. Bei ungültigen Daten stoppt die Regelung sauber und setzt alle internen Speicher zurück. Über einen einfachen Schalter lässt sich die Automatik jederzeit deaktivieren.
-
-> ⚠️ Die Entitäts-IDs sind auf mein Setup zugeschnitten und müssen vor dem Einspielen an die eigene Installation angepasst werden.
-
----
-
-## Hardware-Voraussetzungen
-
-| Komponente | Funktion |
+| Gerät | Funktion |
 |---|---|
-| SunEnergy XT 500 Pro | Hybrid-Wechselrichter / Batteriespeicher |
+| SunEnergy XT 500 Pro | Hausspeicher / Wechselrichter |
 | Shelly Pro 3EM | Netzleistungsmessung am Hauptzähler |
-| Shelly Pro 1-PM | Messung der Microinverter-Leistung (Hoymiles) |
-| Hoymiles Microinverter | Optionale zweite Solarquelle |
+| Hoymiles HMS-2000-4T | Microinverter (Süd-Ausrichtung) |
+| Hoymiles HMS-1600-4T | Microinverter (Nord/Ost/West-Ausrichtung) |
+| OpenDTU | Lokale Steuerung beider Hoymiles-WR ohne Cloud |
 
 ---
 
-## Features V7.8
+## Features
 
-**Asymmetrischer Tiefpassfilter**
-Bei Netzbezug über 30 W reagiert der Regler schnell (70 % Neuwert). Sonst gedämpft (15 % Neuwert) – kurze Lastspitzen werden ignoriert.
+### ⚡ Nulleinspeisung (Zero Feed-In)
+Die Messung erfolgt über den Shelly Pro 3EM am Hauptzähler. Der PI-Regler passt den Sollwert am Netzanschluss alle 5 Sekunden an. Ein asymmetrischer Filter sorgt dafür, dass die Regelung bei echtem Mehrbedarf schnell reagiert, bei kurzen Lastspitzen (z.B. Wasserkocher) aber ruhig bleibt.
 
-**PI-Regler mit Rate-Limiting**
-Proportionalanteil ab 50 W Abweichung, Integralanteil für langsame Drifts, Anti-Windup, max. 100 W Änderung pro Schritt, Schreibschwelle 50 W.
+### 🌞 Dualer Microinverter-Support (ab V8.1)
+Beide Hoymiles-WR werden gemeinsam geregelt. Wenn der Akku voll ist und Einspeisung droht, werden beide WR proportional zur aktuellen Ist-Leistung gedrosselt — automatisch, ohne feste Aufteilung.
 
-**Nachtmodus**
-Ohne Solarproduktion direkter Bezug auf Hausverbrauch, ohne PI-Regelung.
+### 🌙 Nachtmodus
+Ohne Solarproduktion schaltet die Automation in den Nachtmodus: Der Sollwert orientiert sich direkt am Hausverbrauch, ohne PI-Regelung.
 
-**SOC-Schutz**
-Entladung stoppt unterhalb des konfigurierbaren Mindest-SOC.
+### 🔋 SOC-Schutz (Tiefentladeschutz)
+Entladung stoppt automatisch unterhalb eines konfigurierbaren Mindest-SOC.
 
-**15-Tage-Zwangsladung**
-Automatische Vollladung nach längerer Schlechtwetterperiode zum Zellschutz.
+### 🔄 15-Tage-Zwangsladung
+Nach länger als 15 Tagen ohne Vollladung (z.B. Dauerbewölkung) erzwingt die Automation eine Vollladung zum Schutz der Zellchemie.
 
-**Watchdog & Datengültigkeit**
-Prüft ob alle Sensoren aktuelle und gültige Werte liefern. Bei Fehler: sauberer Stopp mit Filter-Reset.
+### 🛡️ Watchdog & Datengültigkeit
+Prüft ob alle Sensoren aktuelle und gültige Werte liefern. Bei Fehler: sauberer Stopp mit Filter-Reset. `continue_on_error: true` verhindert Abbruch bei Einzelfehlern.
 
-**Manueller Modus**
-Regelung per `input_boolean` jederzeit deaktivierbar.
+### ✅ Manueller Modus
+Über `input_boolean.nulleinspeisung_automatik` jederzeit deaktivierbar.
 
 ---
 
@@ -77,13 +63,28 @@ input_number:
     min: -5000
     max: 5000
     step: 0.01
+  xt_max_ausgangsleistung:
+    min: 0
+    max: 5000
+    step: 1
+    initial: 2400
+  xt_min_soc:
+    min: 0
+    max: 100
+    step: 1
+    initial: 10
+  solar_schwelle:
+    min: 0
+    max: 500
+    step: 1
+    initial: 50
 
 input_select:
   deadband_status:
     options:
-      - im Deadband
-      - Bezug
-      - Einspeisung
+      - neutral
+      - import
+      - export
 
 input_datetime:
   letzte_akku_volladung:
@@ -98,12 +99,16 @@ input_datetime:
 | Entität | Beschreibung |
 |---|---|
 | `sensor.shellypro3em_leistung` | Netzleistung in W (+ = Bezug, − = Einspeisung) |
-| `sensor.shellypro1pm_hoymiles_leistung` | Leistung Hoymiles Microinverter |
-| `sensor.hausverbrauch_aktuell` | Aktueller Hausverbrauch gesamt |
+| `sensor.hausverbrauch_aktuell` | Aktueller Hausverbrauch gesamt in W |
 | `sensor.sunenergyxt_500_pro_system_speicherlevel` | SOC des Akkus in % |
-| `sensor.sunenergyxt_500_pro_systemleistung_am_netzanschluss` | Ist-Leistung am Netzanschluss |
-| `number.sunenergyxt_500_pro_sollwert_leistung_netzanschluss` | Sollwert-Eingang Wechselrichter |
-| `sensor.energy_production_today_2` | Tagesertrag Solar in kWh |
+| `sensor.sunenergyxt_500_pro_systemleistung_am_netzanschluss` | Ist-Leistung am Netzanschluss in W |
+| `number.sunenergyxt_500_pro_sollwert_leistung_netzanschluss` | Sollwert-Eingang SunEnergyXT |
+| `sensor.hoymiles_hms_2000_4t_power` | Ist-Leistung HMS-2000 in W |
+| `sensor.hoymiles_hms_1600_4t_power` | Ist-Leistung HMS-1600 in W |
+| `binary_sensor.hoymiles_hms_2000_4t_reachable` | Erreichbarkeit HMS-2000 |
+| `binary_sensor.hoymiles_hms_1600_4t_reachable` | Erreichbarkeit HMS-1600 |
+| `number.hoymiles_hms_2000_4t_limit_nonpersistent_absolute` | Sollwert HMS-2000 in W |
+| `number.hoymiles_hms_1600_4t_limit_nonpersistent_absolute` | Sollwert HMS-1600 in W |
 
 ---
 
@@ -113,34 +118,11 @@ input_datetime:
 2. YAML-Datei in den Automations-Editor kopieren (YAML-Modus)
 3. Alle Entitäts-IDs an das eigene Setup anpassen
 4. `input_boolean.nulleinspeisung_automatik` einschalten
-5. PI-Integral-Speicher auf 0 setzen und Automation neu starten
 
 ---
 
-## Konfigurierbare Parameter
+## Hinweise
 
-| Parameter | Standardwert | Beschreibung |
-|---|---|---|
-| `min_soc` | 18 % | Untergrenze SOC-Schutz |
-| `kp` | 0.6 | Proportionalbeiwert |
-| `ki` | 0.04 | Integralbeiwert |
-| `max_step` | 100 W | Maximale Sollwertänderung pro Schritt |
-| Schreibschwelle | 50 W | Minimale Abweichung zum Schreiben |
-| kP-Aktivierungsschwelle | 50 W | Ab wann der P-Anteil aktiv wird |
-| Zwangsladung | 15 Tage | Intervall ohne Vollladung |
+> ⚠️ Die Entitäts-IDs sind auf mein Setup zugeschnitten. Vor dem Einspielen bitte alle `sensor.*`, `number.*`, `binary_sensor.*` und `input_*` Entitäten an die eigene Installation anpassen.
 
----
-
-## Versionsverlauf
-
-| Version | Änderung |
-|---|---|
-| **V7.8** | kP-Schwelle 100 W → 50 W, `continue_on_error`, Filter-Reset im Sicherheits-Stopp, asymmetrischer Filter, Nachtmodus auf `haus_p`, SOC-Schutz |
-| V7.x | PI-Regler, Rate-Limiting, Anti-Windup, Watchdog, Datengültigkeitsprüfung |
-| V6.x | Einfache Schwellwert-Steuerung mit gefiltertem Messwert |
-
----
-
-## Lizenz
-
-MIT – frei verwendbar, Verbesserungen und Pull Requests willkommen!
+> ℹ️ Wer nur einen Hoymiles-WR hat: HMS-1600 Zeilen einfach weglassen — die Automation funktioniert mit nur dem HMS-2000 genauso.
