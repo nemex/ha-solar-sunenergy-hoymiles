@@ -1,0 +1,359 @@
+alias: "Solar: Master-Steuerung SunEnergy XT 500 Pro"
+description: >
+  V8.5.1: HMS-Drosselung ab SOC 96% statt 98% - greift bevor SunEnergyXT intern
+  bei ~97% aufhoert zu laden
+triggers:
+  - trigger: time_pattern
+    seconds: /5
+  - trigger: homeassistant
+    event: start
+actions:
+  - variables:
+      grid_p_raw: "{{ states('sensor.shellypro3em_leistung') | float(0) }}"
+      grid_p_last: >-
+        {{ states('input_number.pid_regler_gefilterter_error_speicher') |
+        float(0) }}
+      grid_p: |-
+        {%- if grid_p_raw < -30 -%}
+          {{- (grid_p_last * 0.30 + grid_p_raw * 0.70) | round(1) -}}
+        {%- else -%}
+          {{- (grid_p_last * 0.85 + grid_p_raw * 0.15) | round(1) -}}
+        {%- endif -%}
+      solar_p_2000: "{{ (states('sensor.hoymiles_hms_2000_4t_power') | float(0)) | abs }}"
+      solar_p_1600: "{{ (states('sensor.hoymiles_hms_1600_4t_power') | float(0)) | abs }}"
+      hms_1600_online: "{{ is_state('binary_sensor.hoymiles_hms_1600_4t_reachable', 'on') }}"
+      solar_p: "{{ (solar_p_2000 + solar_p_1600) | round(1) }}"
+      solar_p_last: "{{ states('input_number.solar_p_letzter_wert') | float(0) }}"
+      solar_delta: "{{ solar_p | float(0) - solar_p_last | float(0) }}"
+      anteil_2000: |-
+        {%- set total = solar_p_2000 + solar_p_1600 -%}
+        {%- if not hms_1600_online -%}
+          1.0
+        {%- elif total > 50 -%}
+          {{- (solar_p_2000 / total) | round(3) -}}
+        {%- else -%}
+          0.5
+        {%- endif -%}
+      haus_p: "{{ [states('sensor.hausverbrauch_aktuell') | float(0), 0] | max }}"
+      curr_soc: >-
+        {{ states('sensor.sunenergyxt_500_pro_system_speicherlevel') | float(0)
+        }}
+      curr_act: >-
+        {{ states('sensor.sunenergyxt_500_pro_systemleistung_am_netzanschluss')
+        | float(0) }}
+      last_soll: >-
+        {{ states('number.sunenergyxt_500_pro_sollwert_leistung_netzanschluss')
+        | float(0) }}
+      automatik: "{{ is_state('input_boolean.nulleinspeisung_automatik', 'on') }}"
+      akku_volladen: "{{ is_state('input_boolean.akku_volladen', 'on') }}"
+      last_upd: >-
+        {{ as_timestamp(states.sensor.shellypro3em_leistung.last_updated) |
+        float(0) if states.sensor.shellypro3em_leistung is not none else 0 }}
+      watchdog_ok: "{{ (now().timestamp() - last_upd) < 60 }}"
+      data_valid: >-
+        {{ states('sensor.shellypro3em_leistung') not in ['unknown',
+        'unavailable'] and
+        states('sensor.sunenergyxt_500_pro_systemleistung_am_netzanschluss') not
+        in ['unknown', 'unavailable'] }}
+      letzte_v: >-
+        {{ state_attr('input_datetime.letzte_akku_volladung', 'timestamp') |
+        float(0) }}
+      tage_seit: "{{ (now().timestamp() - letzte_v) / 86400 }}"
+      erzwinge_ladung: "{{ tage_seit > 15 and now().hour >= 14 }}"
+      min_soc: "{{ states('input_number.xt_min_soc') | float(10) }}"
+      max_p: "{{ states('input_number.xt_max_ausgangsleistung') | float(2400) }}"
+      solar_schwelle: "{{ states('input_number.solar_schwelle') | float(50) }}"
+      tag_modus: "{{ solar_p > solar_schwelle }}"
+      deadband_high: 50
+      deadband_low: "{{ -80 if not (tag_modus | bool) else -50 }}"
+      deadband: |-
+        {%- if (grid_p | float(0)) > deadband_high -%}
+          import
+        {%- elif (grid_p | float(0)) < (deadband_low | float(0)) -%}
+          export
+        {%- else -%}
+          neutral
+        {%- endif -%}
+      dt: 5
+      ki: 0.005
+      i_limit: 150
+      last_int: "{{ states('input_number.kopfspeicher_pi_integral') | float(0) }}"
+      error: "{{ grid_p | float(0) if deadband != 'neutral' else 0 }}"
+      kp: |-
+        {%- if (error | float(0) | abs) > 200 -%}
+          0.5
+        {%- elif (error | float(0) | abs) > 50 -%}
+          0.2
+        {%- else -%}
+          0.08
+        {%- endif -%}
+      r_integ_raw: |-
+        {%- if tag_modus | bool -%}
+          {%- if deadband == 'neutral' -%}
+            {{- (last_int * 0.97) | round(2) -}}
+          {%- elif (error | float(0) | abs) > 20 -%}
+            {{- last_int + (ki * (error | float(0)) * dt) -}}
+          {%- else -%}
+            {{- (last_int * 0.97) | round(2) -}}
+          {%- endif -%}
+        {%- else -%}
+          {{- (last_int * 0.90) | round(2) -}}
+        {%- endif -%}
+      n_integ: "{{ [[r_integ_raw | float(0), i_limit] | min, -i_limit] | max }}"
+      anti_windup_ok: >-
+        {{ (r_integ_raw | float(0) > -i_limit and r_integ_raw | float(0) <
+        i_limit) or (r_integ_raw | float(0) <= -i_limit and error | float(0) >
+        0) or (r_integ_raw | float(0) >= i_limit and error | float(0) < 0) }}
+      n_integ_final: "{{ n_integ if anti_windup_ok else last_int }}"
+      feedforward: |-
+        {%- if tag_modus | bool and (solar_delta | float(0) | abs) > 150 -%}
+          {{- (solar_delta | float(0) * -1) | round(0) | int -}}
+        {%- else -%}
+          0
+        {%- endif -%}
+      r_target: >-
+        {{ ((last_soll | float(0)) + ((kp | float(0)) * (error | float(0))) +
+        (n_integ_final | float(0)) + (feedforward | float(0))) | round(0) | int
+        }}
+      solar_ladepower: "{{ [solar_p | round(0) | int, max_p | int] | min }}"
+      solar_ueberschuss: "{{ solar_p | float(0) - haus_p | float(0) }}"
+      final_target: |-
+        {%- if akku_volladen and curr_soc < 100 -%}
+          {%- if solar_p > solar_schwelle -%}
+            {{- (solar_ladepower * -1) | int -}}
+          {%- else -%} 0 {%- endif -%}
+        {%- elif erzwinge_ladung and curr_soc < 100 -%}
+          {%- if solar_p > solar_schwelle -%}
+            {{- (solar_ladepower * -1) | int -}}
+          {%- else -%} 0 {%- endif -%}
+        {%- elif tag_modus | bool -%}
+          {%- if deadband == 'import' -%}
+            {%- if curr_soc <= min_soc -%}
+              {{- [[last_soll | int, 0] | min, -10] | max -}}
+            {%- else -%}
+              {{- [[r_target, 0] | max, max_p | int] | min -}}
+            {%- endif -%}
+          {%- elif deadband == 'export' and curr_soc < 100 -%}
+            {{- [[r_target, max_p | int * -1] | max, -10] | min -}}
+          {%- elif deadband == 'export' and curr_soc >= 100 -%}
+            0
+          {%- elif deadband == 'neutral' and curr_soc < 100 and solar_ueberschuss > 150 -%}
+            {{- [solar_ueberschuss | round(0) | int * -1, max_p | int * -1] | max -}}
+          {%- else -%}
+            {{- last_soll | int -}}
+          {%- endif -%}
+        {%- else -%}
+          {%- if curr_soc <= min_soc -%}
+            0
+          {%- else -%}
+            {{- [[haus_p | round(0) | int, 0] | max, max_p | int] | min -}}
+          {%- endif -%}
+        {%- endif -%}
+      delta_raw: "{{ (final_target | int) - (last_soll | int) }}"
+      rate_limit: |-
+        {%- if (solar_delta | float(0) | abs) > 150 -%}
+          2400
+        {%- elif (delta_raw | int) < 0 and (grid_p | float(0)) < -30 -%}
+          2400
+        {%- elif tag_modus | bool -%}
+          {{- 200 if (grid_p | float(0) | abs) > 300 else 100 -}}
+        {%- elif (delta_raw | int) > 0 -%}
+          200
+        {%- else -%}
+          2400
+        {%- endif -%}
+      final_target_rated: |-
+        {%- if (delta_raw | int | abs) > (rate_limit | int) -%}
+          {{- (last_soll | int) + (rate_limit | int * (1 if (delta_raw | int) > 0 else -1)) -}}
+        {%- else -%}
+          {{- final_target | int -}}
+        {%- endif -%}
+      soll_schreiben: |-
+        {%- if not (tag_modus | bool) -%}
+          {{- ((final_target_rated | int) - (last_soll | int)) | abs >= 20 -}}
+        {%- else -%}
+          {{- ((final_target_rated | int) - (last_soll | int)) | abs >= 50 -}}
+        {%- endif -%}
+      hms_gesamt_soll: |-
+        {%- if not (tag_modus | bool) -%}
+          {{- solar_p | round(0) | int -}}
+        {%- elif curr_soc >= 96 -%}
+          {%- set target = (solar_p | float(0)) + (grid_p | float(0)) -%}
+          {%- set min_limit = [haus_p | float(0), 100] | max -%}
+          {{- [[target | round(0) | int, 3600] | min, min_limit | int] | max -}}
+        {%- else -%}
+          3600
+        {%- endif -%}
+      hms_2000_soll: >-
+        {{ ([hms_gesamt_soll | int * (anteil_2000 | float(0.5)), 2000] | min) |
+        round(0) | int }}
+      hms_1600_soll: >-
+        {{ ([hms_gesamt_soll | int * (1 - (anteil_2000 | float(0.5))), 1600] |
+        min) | round(0) | int }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ not (watchdog_ok | bool) or not (automatik | bool) or not
+              (data_valid | bool) }}
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.pid_regler_gefilterter_error_speicher
+            data:
+              value: "{{ grid_p_raw | round(1) }}"
+          - action: number.set_value
+            target:
+              entity_id: number.sunenergyxt_500_pro_sollwert_leistung_netzanschluss
+            data:
+              value: 0
+            continue_on_error: true
+          - stop: Sicherheits-Stopp (Offline oder Automatik aus)
+      - conditions:
+          - condition: template
+            value_template: "{{ (akku_volladen | bool) and (curr_soc | float(0)) >= 100 }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.akku_volladen
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.letzte_akku_volladung
+            data:
+              timestamp: "{{ now().timestamp() | int }}"
+          - stop: Akku vollgeladen - Schalter deaktiviert
+      - conditions:
+          - condition: template
+            value_template: "{{ (akku_volladen | bool) and (curr_soc | float(0)) < 100 }}"
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.solar_p_letzter_wert
+            data:
+              value: "{{ solar_p | round(1) }}"
+          - action: number.set_value
+            target:
+              entity_id: number.sunenergyxt_500_pro_sollwert_leistung_netzanschluss
+            data:
+              value: "{{ final_target_rated | int }}"
+            continue_on_error: true
+          - stop: Akku-Volladen aktiv
+      - conditions:
+          - condition: template
+            value_template: "{{ (erzwinge_ladung | bool) and (curr_soc | float(0)) < 100 }}"
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.solar_p_letzter_wert
+            data:
+              value: "{{ solar_p | round(1) }}"
+          - action: number.set_value
+            target:
+              entity_id: number.sunenergyxt_500_pro_sollwert_leistung_netzanschluss
+            data:
+              value: "{{ final_target_rated | int }}"
+            continue_on_error: true
+          - stop: Zwangsladung aktiv
+    default:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.pid_regler_gefilterter_error_speicher
+        data:
+          value: "{{ grid_p | float(0) | round(1) }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.solar_p_letzter_wert
+        data:
+          value: "{{ solar_p | float(0) | round(1) }}"
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.deadband_status
+        data:
+          option: "{{ deadband | trim }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.kopfspeicher_pi_integral
+        data:
+          value: "{{ n_integ_final | float(0) | round(2) }}"
+      - if:
+          - condition: template
+            value_template: "{{ soll_schreiben | bool }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: number.sunenergyxt_500_pro_sollwert_leistung_netzanschluss
+            data:
+              value: "{{ final_target_rated | int }}"
+            continue_on_error: true
+      - if:
+          - condition: template
+            value_template: "{{ curr_soc | float(0) >= 100 }}"
+        then:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.letzte_akku_volladung
+            data:
+              timestamp: "{{ now().timestamp() | int }}"
+      - if:
+          - condition: template
+            value_template: "{{ tag_modus | bool }}"
+        then:
+          - if:
+              - condition: template
+                value_template: "{{ curr_soc | float(0) >= 96 }}"
+            then:
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{
+                      (states('number.hoymiles_hms_2000_4t_limit_nonpersistent_absolute')
+                      | int(2000) - hms_2000_soll | int) | abs >= 50 }}
+                then:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.hoymiles_hms_2000_4t_limit_nonpersistent_absolute
+                    data:
+                      value: "{{ hms_2000_soll }}"
+                    continue_on_error: true
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ hms_1600_online | bool and
+                      (states('number.hoymiles_hms_1600_4t_limit_nonpersistent_absolute')
+                      | int(1600) - hms_1600_soll | int) | abs >= 50 }}
+                then:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.hoymiles_hms_1600_4t_limit_nonpersistent_absolute
+                    data:
+                      value: "{{ hms_1600_soll }}"
+                    continue_on_error: true
+            else:
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{
+                      states('number.hoymiles_hms_2000_4t_limit_nonpersistent_absolute')
+                      | int(2000) != 2000 }}
+                then:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.hoymiles_hms_2000_4t_limit_nonpersistent_absolute
+                    data:
+                      value: 2000
+                    continue_on_error: true
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ hms_1600_online | bool and
+                      states('number.hoymiles_hms_1600_4t_limit_nonpersistent_absolute')
+                      | int(1600) != 1600 }}
+                then:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.hoymiles_hms_1600_4t_limit_nonpersistent_absolute
+                    data:
+                      value: 1600
+                    continue_on_error: true
+mode: single
+max_exceeded: silent
